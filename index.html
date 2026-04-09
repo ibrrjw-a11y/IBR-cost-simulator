@@ -1,0 +1,573 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IBR 역산 원가 시뮬레이터</title>
+<link rel="icon" href="data:,">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<style>body{margin:0;padding:0;}</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useMemo } = React;
+
+const fmt = (n) => isNaN(n) || n == null ? "—" : Math.round(n).toLocaleString("ko-KR");
+const fmtFx = (n, sym) => isNaN(n) || n == null ? "—" : sym + n.toFixed(2);
+
+const CURRENCIES = [
+  { code: "USD", symbol: "$", name: "미국 달러", defaultRate: "1400" },
+  { code: "EUR", symbol: "€", name: "유로", defaultRate: "1550" },
+  { code: "GBP", symbol: "£", name: "영국 파운드", defaultRate: "1800" },
+  { code: "AUD", symbol: "A$", name: "호주 달러", defaultRate: "920" },
+  { code: "NZD", symbol: "NZ$", name: "뉴질랜드 달러", defaultRate: "850" },
+  { code: "JPY", symbol: "¥", name: "일본 엔", defaultRate: "9.5" },
+  { code: "CHF", symbol: "CHF ", name: "스위스 프랑", defaultRate: "1600" },
+];
+
+const TIERS = [
+  { rate: 0.25, label: "최선", color: "#1D9E75", bg: "#E1F5EE", desc: "즉시 진행" },
+  { rate: 0.30, label: "진행 가능", color: "#185FA5", bg: "#E6F1FB", desc: "표준 조건" },
+  { rate: 0.35, label: "논의 필요", color: "#BA7517", bg: "#FAEEDA", desc: "채널 축소 검토" },
+  { rate: 0.40, label: "드랍", color: "#A32D2D", bg: "#FCEBEB", desc: "진행 불가" },
+];
+
+const CATEGORIES = [
+  { name: "꿀", target: 0.25, max: 0.30 },
+  { name: "이너뷰티", target: 0.25, max: 0.30 },
+  { name: "뷰티", target: 0.25, max: 0.30 },
+  { name: "헬스", target: 0.30, max: 0.35 },
+  { name: "가구 (풀마케팅)", target: 0.26, max: 0.35 },
+  { name: "가구 (홈쇼핑only)", target: 0.35, max: 0.40 },
+];
+
+const RRP_CASES = [
+  { id: "direct", label: "직접 입력" },
+  { id: "domestic", label: "경우1: 국내 공식가" },
+  { id: "overseas", label: "경우2: 해외 공식가 × 1.1" },
+  { id: "competitor", label: "경우3: 경쟁사 조사 역산" },
+];
+
+window.ReverseSimulator = function ReverseSimulator() {
+  const [rrpCase, setRrpCase] = useState("direct");
+  const [rrpDirect, setRrpDirect] = useState("");
+  const [domesticPrice, setDomesticPrice] = useState("");
+  const [overseasPrice, setOverseasPrice] = useState("");
+  const [competitorAvg, setCompetitorAvg] = useState("");
+  const [discountCoeff, setDiscountCoeff] = useState("0.929");
+  const [exchangeRate, setExchangeRate] = useState("1400");
+  const [currency, setCurrency] = useState(0);
+  const [customsRate, setCustomsRate] = useState("8");
+  const [category, setCategory] = useState(0);
+  const [foreignOfficial, setForeignOfficial] = useState("");
+  const [brandName, setBrandName] = useState("");
+  const [productName, setProductName] = useState("");
+  const [directBuyPrice, setDirectBuyPrice] = useState("");
+  const [showEmail, setShowEmail] = useState(false);
+  const [translatedText, setTranslatedText] = useState("");
+  const [isTranslating, setIsTranslating] = useState(false);
+  const [apiKey, setApiKey] = useState("");
+
+  const cur = CURRENCIES[currency];
+  const handleCurrencyChange = (idx) => {
+    setCurrency(idx);
+    setExchangeRate(CURRENCIES[idx].defaultRate);
+  };
+
+  const rrp = useMemo(() => {
+    const er = parseFloat(exchangeRate) || 1400;
+    switch (rrpCase) {
+      case "direct": return parseFloat(rrpDirect) || 0;
+      case "domestic": return Math.round((parseFloat(domesticPrice) || 0) * 0.9);
+      case "overseas": {
+        const p = parseFloat(overseasPrice) || 0;
+        return Math.ceil((p * er * 1.1) / 1000) * 1000;
+      }
+      case "competitor": {
+        const avg = parseFloat(competitorAvg) || 0;
+        const coeff = parseFloat(discountCoeff) || 0.929;
+        return Math.ceil((avg / coeff) / 1000) * 1000;
+      }
+      default: return 0;
+    }
+  }, [rrpCase, rrpDirect, domesticPrice, overseasPrice, exchangeRate, competitorAvg, discountCoeff]);
+
+  const results = useMemo(() => {
+    if (!rrp || rrp <= 0) return null;
+    const er = parseFloat(exchangeRate) || 1400;
+    const customs = (parseFloat(customsRate) || 0) / 100;
+    const fop = parseFloat(foreignOfficial) || 0;
+    const fopKrw = fop * er;
+
+    return TIERS.map((tier) => {
+      const landingCost = rrp * tier.rate;
+      const fob = landingCost / 1.2 / (1 + customs) / er;
+      const fobKrw = landingCost / 1.2 / (1 + customs);
+      const ratioToOfficial = fopKrw > 0 ? (fobKrw / fopKrw) * 100 : null;
+      return { ...tier, landingCost, fob, fobKrw, ratioToOfficial };
+    });
+  }, [rrp, exchangeRate, customsRate, foreignOfficial]);
+
+  const cat = CATEGORIES[category];
+
+  return (
+    <div style={{ fontFamily: "'Pretendard Variable', 'Noto Sans KR', sans-serif", background: "#fafaf8", color: "#1a1a1a", minHeight: "100vh" }}>
+      <style>{`
+        @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css');
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        input, select { font-family: inherit; }
+        input[type="number"] { -moz-appearance: textfield; }
+        input[type="number"]::-webkit-inner-spin-button { opacity: 1; }
+      `}</style>
+
+      <div style={{ maxWidth: 720, margin: "0 auto", padding: "32px 24px" }}>
+        <div style={{ marginBottom: 32 }}>
+          <h1 style={{ fontSize: 24, fontWeight: 700, letterSpacing: "-0.5px", marginBottom: 6 }}>
+            역산 원가 시뮬레이터
+          </h1>
+          <p style={{ fontSize: 14, color: "#888" }}>
+            소비자가에서 브랜드사 공급가(FOB)를 역산합니다
+          </p>
+        </div>
+
+        {/* 1. RRP */}
+        <Section title="1. 소비자가 (RRP) 산정">
+          <div style={{ marginBottom: 12 }}>
+            <select value={rrpCase} onChange={e => setRrpCase(e.target.value)} style={selectSt}>
+              {RRP_CASES.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
+            </select>
+          </div>
+
+          {rrpCase === "direct" && (
+            <InputRow label="소비자가 (원)" value={rrpDirect} onChange={setRrpDirect} placeholder="50,000" />
+          )}
+          {rrpCase === "domestic" && (
+            <InputRow label="국내 공식가 (원)" value={domesticPrice} onChange={setDomesticPrice} placeholder="50,000" />
+          )}
+          {rrpCase === "overseas" && (
+            <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+              <div style={{ flex: 1 }}>
+                <InputRow label={`해외 공식가 (${cur.code})`} value={overseasPrice} onChange={setOverseasPrice} placeholder="30.00" />
+              </div>
+              <div style={{ width: 120, fontSize: 12, color: "#999", paddingBottom: 10 }}>
+                × 환율 × 1.1 적용
+              </div>
+            </div>
+          )}
+          {rrpCase === "competitor" && (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <InputRow label="경쟁사 평균 판매가 (원)" value={competitorAvg} onChange={setCompetitorAvg} placeholder="46,500" />
+              <InputRow label="상시할인가 계수" value={discountCoeff} onChange={setDiscountCoeff} placeholder="0.929" />
+            </div>
+          )}
+
+          {rrp > 0 && (
+            <div style={{ marginTop: 12, padding: "10px 14px", background: "#fff", border: "1px solid #e8e8e4", borderRadius: 8, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 13, color: "#888" }}>기준 판매가</span>
+              <span style={{ fontSize: 20, fontWeight: 700 }}>{fmt(rrp)}원</span>
+              {rrpCase === "domestic" && domesticPrice && (
+                <span style={{ fontSize: 12, color: "#aaa" }}>(국내공식가 {fmt(parseFloat(domesticPrice))}원 × 0.9 = 홈쇼핑가 기준)</span>
+              )}
+              {rrpCase === "overseas" && overseasPrice && (
+                <span style={{ fontSize: 12, color: "#aaa" }}>({overseasPrice} × {exchangeRate} × 1.1 → 천원 반올림)</span>
+              )}
+            </div>
+          )}
+        </Section>
+
+        {/* 2. Variables */}
+        <Section title="2. 변수 입력">
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 12 }}>
+            <div>
+              <label style={labelSt}>통화</label>
+              <select value={currency} onChange={e => handleCurrencyChange(parseInt(e.target.value))} style={selectSt}>
+                {CURRENCIES.map((c, i) => <option key={i} value={i}>{c.code} ({c.name})</option>)}
+              </select>
+            </div>
+            <InputRow label={`환율 (₩/${cur.code})`} value={exchangeRate} onChange={setExchangeRate} placeholder={cur.defaultRate} />
+            <InputRow label="관세율 (%)" value={customsRate} onChange={setCustomsRate} placeholder="8" />
+            <div>
+              <label style={labelSt}>카테고리</label>
+              <select value={category} onChange={e => setCategory(parseInt(e.target.value))} style={selectSt}>
+                {CATEGORIES.map((c, i) => <option key={i} value={i}>{c.name}</option>)}
+              </select>
+            </div>
+          </div>
+          <div style={{ marginTop: 12 }}>
+            <InputRow label={`해외 공식가 (${cur.code}, 비교용)`} value={foreignOfficial} onChange={setForeignOfficial} placeholder="비율 환산에 사용" />
+          </div>
+          <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+            <div>
+              <label style={labelSt}>브랜드명 (메일용)</label>
+              <input type="text" value={brandName} onChange={e => setBrandName(e.target.value)} placeholder="SALONIA" style={inputSt} />
+            </div>
+            <div>
+              <label style={labelSt}>제품명 (메일용)</label>
+              <input type="text" value={productName} onChange={e => setProductName(e.target.value)} placeholder="스트레이트 고데기 24mm" style={inputSt} />
+            </div>
+            <InputRow label={`해외 직구가 (${cur.code}, 메일용)`} value={directBuyPrice} onChange={setDirectBuyPrice} placeholder="해외직구 현재 판매가" />
+          </div>
+        </Section>
+
+        {/* 3. Results */}
+        {results && rrp > 0 && (
+          <Section title={`3. 원가율별 최대 FOB (${cur.code})`}>
+            {/* 4 tier cards */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginBottom: 20 }}>
+              {results.map((r, i) => {
+                const isTarget = Math.abs(r.rate - cat.target) < 0.02;
+                return (
+                  <div key={i} style={{
+                    padding: "14px 12px", borderRadius: 10, background: r.bg,
+                    border: isTarget ? `2px solid ${r.color}` : `1px solid ${r.bg}`,
+                    position: "relative",
+                  }}>
+                    {isTarget && (
+                      <div style={{
+                        position: "absolute", top: -8, left: 10,
+                        background: r.color, color: "#fff",
+                        fontSize: 10, fontWeight: 600, padding: "1px 8px", borderRadius: 4,
+                      }}>카테고리 목표</div>
+                    )}
+                    <div style={{ fontSize: 11, color: r.color, fontWeight: 600 }}>{r.label}</div>
+                    <div style={{ fontSize: 10, color: "#999", marginBottom: 8 }}>
+                      원가율 {Math.round(r.rate * 100)}% · {r.desc}
+                    </div>
+                    <div style={{ fontSize: 10, color: "#999" }}>랜딩코스트</div>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: r.color, marginBottom: 6 }}>
+                      {fmt(r.landingCost)}원
+                    </div>
+                    <div style={{ fontSize: 10, color: "#999" }}>최대 FOB ({cur.code})</div>
+                    <div style={{ fontSize: 20, fontWeight: 800, color: r.color }}>
+                      {fmtFx(r.fob, cur.symbol)}
+                    </div>
+                    {r.ratioToOfficial != null && (
+                      <div style={{ fontSize: 11, color: "#999", marginTop: 4 }}>
+                        해외가의 {Math.round(r.ratioToOfficial)}%
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Detail table */}
+            <div style={{ background: "#fff", border: "1px solid #e8e8e4", borderRadius: 10, overflow: "hidden", marginBottom: 20 }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                <thead>
+                  <tr style={{ background: "#f5f5f0" }}>
+                    <th style={thSt}>원가율</th>
+                    <th style={thSt}>판단</th>
+                    <th style={{ ...thSt, textAlign: "right" }}>랜딩코스트</th>
+                    <th style={{ ...thSt, textAlign: "right" }}>FOB ({cur.code})</th>
+                    <th style={{ ...thSt, textAlign: "right" }}>FOB (원화)</th>
+                    {foreignOfficial && <th style={{ ...thSt, textAlign: "right" }}>해외가 대비</th>}
+                  </tr>
+                </thead>
+                <tbody>
+                  {results.map((r, i) => (
+                    <tr key={i} style={{ background: Math.abs(r.rate - cat.target) < 0.02 ? r.bg : "transparent" }}>
+                      <td style={tdSt}><span style={{ fontWeight: 600 }}>{Math.round(r.rate * 100)}%</span></td>
+                      <td style={tdSt}>
+                        <span style={{
+                          display: "inline-block", padding: "1px 8px", borderRadius: 4,
+                          background: r.bg, color: r.color, fontSize: 11, fontWeight: 600,
+                        }}>{r.label}</span>
+                      </td>
+                      <td style={{ ...tdSt, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmt(r.landingCost)}원</td>
+                      <td style={{ ...tdSt, textAlign: "right", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{fmtFx(r.fob, cur.symbol)}</td>
+                      <td style={{ ...tdSt, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmt(r.fobKrw)}원</td>
+                      {foreignOfficial && <td style={{ ...tdSt, textAlign: "right" }}>{r.ratioToOfficial ? r.ratioToOfficial.toFixed(1) + "%" : "—"}</td>}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Brand message */}
+            <div style={{
+              background: "#fff", border: "1px solid #e8e8e4", borderRadius: 10,
+              padding: "20px 24px", marginBottom: 16,
+            }}>
+              <div style={{ fontSize: 12, color: "#999", marginBottom: 10, fontWeight: 600 }}>
+                브랜드사 전달 메시지
+              </div>
+              <div style={{ fontSize: 14, lineHeight: 1.9, color: "#333" }}>
+                한국 시장 {rrpCase === "domestic" ? "홈쇼핑 판매가" : "판매가"} <b>{fmt(rrp)}원</b> 기준,
+                {rrpCase === "domestic" && <><br /><span style={{ fontSize: 12, color: "#999" }}>(국내공식가 {fmt(parseFloat(domesticPrice))}원의 -10%)</span></>}
+                <br />유통 수수료(50%) + 광고비 + 운영비를 고려하면
+                <br />
+                <br />
+                <span style={{ display: "inline-block", padding: "4px 12px", borderRadius: 6, background: results[0].bg, color: results[0].color, fontWeight: 700, fontSize: 16 }}>
+                  공급가 {fmtFx(results[0].fob, cur.symbol)} 이하 — 최선
+                </span>
+                <br />
+                <span style={{ display: "inline-block", padding: "4px 12px", borderRadius: 6, background: results[2].bg, color: results[2].color, fontWeight: 600, fontSize: 14, marginTop: 4 }}>
+                  공급가 {fmtFx(results[2].fob, cur.symbol)} — 논의 가능 상한
+                </span>
+                <br />
+                <span style={{ display: "inline-block", padding: "4px 12px", borderRadius: 6, background: results[3].bg, color: results[3].color, fontWeight: 600, fontSize: 14, marginTop: 4 }}>
+                  공급가 {fmtFx(results[3].fob, cur.symbol)} 이상 — 진행 불가
+                </span>
+                {foreignOfficial && parseFloat(foreignOfficial) > 0 && (
+                  <div style={{ marginTop: 12, padding: "10px 14px", background: "#f5f5f0", borderRadius: 8, fontSize: 13, color: "#666" }}>
+                    해외 공식가 {fmtFx(parseFloat(foreignOfficial), cur.symbol)} 대비{" "}
+                    <b>{Math.round(results[0].ratioToOfficial)}%~{Math.round(results[2].ratioToOfficial)}%</b> 수준의 공급가가 필요합니다.
+                    <br />한국 시장 안착을 위한 구조적 비용이며, 마진 극대화 목적이 아닙니다.
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Formula */}
+            <div style={{ fontSize: 12, color: "#bbb", lineHeight: 1.6 }}>
+              공식: FOB = 기준판매가 × 원가율 ÷ 1.2(운임) ÷ (1+관세율) ÷ 환율
+              <br />랜딩코스트 = FOB × 환율 × 1.2 × (1+관세율)
+              <br />원가율 = 랜딩코스트 ÷ 기준판매가
+              <br />※ 경우1(국내공식가): 기준판매가 = 국내공식가 × 0.9 (홈쇼핑가)
+            </div>
+
+            {/* Email Template */}
+            <div style={{ marginTop: 24 }}>
+              <button onClick={() => setShowEmail(!showEmail)} style={{
+                width: "100%", padding: "12px 16px", background: showEmail ? "#1a1a1a" : "#fff",
+                color: showEmail ? "#fff" : "#1a1a1a",
+                border: "1px solid #1a1a1a", borderRadius: 8, fontSize: 14, fontWeight: 600,
+                cursor: "pointer", fontFamily: "inherit",
+              }}>
+                {showEmail ? "메일 템플릿 닫기" : "4. 브랜드사 협상 메일 템플릿 생성"}
+              </button>
+            </div>
+
+            {showEmail && (() => {
+              const bn = brandName || "[브랜드명]";
+              const pn = productName || "[제품명]";
+              const fop = parseFloat(foreignOfficial) || 0;
+              const dbp = parseFloat(directBuyPrice) || 0;
+              const er = parseFloat(exchangeRate) || 1400;
+              const dbpKrw = dbp > 0 ? Math.round(dbp * er) : 0;
+              const targetFob = results[0].fob;
+              const targetLanding = results[0].landingCost;
+              const ratioOff = results[0].ratioToOfficial;
+
+              const emailText = `${bn} 한국 시장 전개를 위한 공급가 협의 요청
+
+안녕하세요.
+IBR에서 ${bn} 브랜드의 한국 시장 공식 유통을 담당하고 있는 유재욱 팀장입니다.
+
+${bn}의 한국 시장 본격 전개를 위해, 공급가 관련 협의를 요청드립니다.
+아래 한국 시장의 유통 구조와 비용 현황을 공유드리오니 검토 부탁드립니다.
+
+─────────────────────────
+
+1. 한국 시장 가격 환경
+${dbp > 0 ? `
+현재 한국 내 해외직구 채널에서 ${bn} ${pn} 제품이 약 ${fmt(dbpKrw)}원(${cur.symbol}${dbp.toFixed(2)})에 판매되고 있습니다.
+
+공식 수입 판매의 경우 아래와 같은 추가 가치를 제공합니다:
+- 로컬 규격 대응 (전압, 인증, 한글 표기 등)
+- 국내 배송 (1~2일) 및 공식 AS
+- 브랜드 공식 채널을 통한 인지도 구축
+
+다만, 동일 제품이 직구로 저렴하게 구매 가능한 상황에서 국내 판매가는 직구가 대비 경쟁력 있는 수준으로 설정되어야 합니다.` : `
+현재 한국 시장에서의 ${bn} 제품 포지셔닝과 경쟁 환경을 분석한 결과, 적정 판매가를 ${fmt(rrp)}원 수준으로 산정하였습니다.`}
+
+2. 한국 유통 비용 구조
+
+한국 시장에서 제품을 판매하기 위해 구조적으로 발생하는 비용은 다음과 같습니다:
+
+- 유통 채널 수수료: 판매가의 약 40~50%
+  (홈쇼핑, 온라인 플랫폼 등 주요 채널 기준)
+- 광고비: 판매가의 약 10~15%
+  (신규 브랜드의 경우, 유료 광고 없이는 실질적 매출 형성이 어려운 구조)
+- CS / 반품 / 물류 운영: 판매가의 약 3~5%
+- 수입 물류 + 관세: 상품 원가의 약 20% + 관세
+
+위 비용을 합산하면, 판매가 대비 약 70~75%가 유통·마케팅·운영 비용으로 소진됩니다.
+
+즉, 상품 원가로 사용할 수 있는 비중은 판매가의 약 25~30% 수준입니다.
+
+이는 IBR의 마진을 극대화하려는 것이 아니라, 한국 시장에서 마케팅·광고를 집행하고 지속적으로 판매할 수 있는 최소한의 구조적 조건입니다.
+
+3. 요청 공급가
+${fop > 0 ? `
+현재 해외 공식가 ${cur.symbol}${fop.toFixed(2)} 기준,
+한국 시장 안착을 위한 적정 공급가는 ${cur.symbol}${targetFob.toFixed(2)} 수준(해외 공식가의 약 ${Math.round(ratioOff)}%)으로 산정됩니다.` : `
+한국 시장 판매가 ${fmt(rrp)}원 기준,
+적정 공급가는 ${cur.symbol}${targetFob.toFixed(2)} 수준(랜딩코스트 ${fmt(targetLanding)}원 이내)으로 산정됩니다.`}
+
+이 수준이 확보되어야:
+- 주요 온라인 채널에서 광고 집행이 가능하며
+- 홈쇼핑 등 대형 채널 진입이 가능하고
+- 초기 리뷰·인지도 확보를 위한 프로모션 진행이 가능합니다.
+
+위 공급가 기준이 어려우실 경우, 가능한 범위에서 조율 방안을 함께 논의하고 싶습니다.
+
+검토 후 회신 주시면 감사하겠습니다.
+
+감사합니다.
+유재욱 드림.`;
+
+              const translateEmail = async () => {
+                setIsTranslating(true);
+                setTranslatedText("");
+                try {
+                  const headers = { "Content-Type": "application/json" };
+                  if (apiKey) {
+                    headers["x-api-key"] = apiKey;
+                    headers["anthropic-version"] = "2023-06-01";
+                    headers["anthropic-dangerous-direct-browser-access"] = "true";
+                  }
+                  const res = await fetch("https://api.anthropic.com/v1/messages", {
+                    method: "POST",
+                    headers,
+                    body: JSON.stringify({
+                      model: "claude-sonnet-4-20250514",
+                      max_tokens: 2000,
+                      messages: [{
+                        role: "user",
+                        content: `Translate the following Korean business email into English.
+
+Rules:
+- This is a formal B2B negotiation email from an importer to a brand owner
+- Professional, respectful, and persuasive corporate tone
+- Keep all numbers, currency symbols, and percentages as-is
+- Do NOT translate brand names or product names
+- Keep the structure (numbered sections, line breaks) intact
+- Output ONLY the translated email, no explanations
+
+Email to translate:
+
+${emailText}`
+                      }]
+                    })
+                  });
+                  const data = await res.json();
+                  const text = data.content?.find(c => c.type === "text")?.text || "번역 실패: " + (data.error?.message || JSON.stringify(data));
+                  setTranslatedText(text);
+                } catch (e) {
+                  setTranslatedText("번역 중 오류: " + e.message);
+                }
+                setIsTranslating(false);
+              };
+
+              return (
+                <div style={{ marginTop: 16 }}>
+                  {/* Korean version */}
+                  <div style={{
+                    background: "#fff", border: "1px solid #e8e8e4", borderRadius: 10,
+                    overflow: "hidden", marginBottom: 12,
+                  }}>
+                    <div style={{
+                      padding: "12px 20px", background: "#f5f5f0", borderBottom: "1px solid #e8e8e4",
+                      display: "flex", justifyContent: "space-between", alignItems: "center",
+                    }}>
+                      <span style={{ fontSize: 13, fontWeight: 600, color: "#555" }}>한국어 원본</span>
+                      <button onClick={() => navigator.clipboard.writeText(emailText)} style={copyBtnSt}>복사</button>
+                    </div>
+                    <pre style={emailPreSt}>{emailText}</pre>
+                  </div>
+
+                  {/* Translation */}
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
+                    <input
+                      type="password"
+                      value={apiKey}
+                      onChange={e => setApiKey(e.target.value)}
+                      placeholder="Anthropic API Key (외부 사용 시)"
+                      style={{ ...inputSt, width: 280, fontSize: 12, padding: "6px 10px" }}
+                    />
+                    <button onClick={translateEmail} disabled={isTranslating || (!apiKey && typeof window !== "undefined" && !window.frameElement)} style={{
+                      padding: "8px 20px", background: isTranslating ? "#ccc" : "#1a1a1a", color: "#fff",
+                      border: "none", borderRadius: 8, fontSize: 13, fontWeight: 600,
+                      cursor: isTranslating ? "wait" : "pointer", fontFamily: "inherit",
+                    }}>
+                      {isTranslating ? "번역 중..." : "English 번역"}
+                    </button>
+                    <span style={{ fontSize: 11, color: "#bbb" }}>키는 저장되지 않습니다</span>
+                  </div>
+
+                  {/* Translated version */}
+                  {translatedText && (
+                    <div style={{
+                      background: "#fff", border: "1px solid #e8e8e4", borderRadius: 10,
+                      overflow: "hidden",
+                    }}>
+                      <div style={{
+                        padding: "12px 20px", background: "#f0f5ff", borderBottom: "1px solid #e8e8e4",
+                        display: "flex", justifyContent: "space-between", alignItems: "center",
+                      }}>
+                        <span style={{ fontSize: 13, fontWeight: 600, color: "#336" }}>English</span>
+                        <button onClick={() => navigator.clipboard.writeText(translatedText)} style={copyBtnSt}>복사</button>
+                      </div>
+                      <pre style={emailPreSt}>{translatedText}</pre>
+                    </div>
+                  )}
+
+                  <div style={{ fontSize: 11, color: "#bbb", marginTop: 8 }}>
+                    ※ 번역은 AI 기반으로 생성됩니다. 발송 전 내용을 반드시 검토하세요.
+                  </div>
+                </div>
+              );
+            })()}
+          </Section>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Section({ title, children }) {
+  return (
+    <div style={{ marginBottom: 28 }}>
+      <h2 style={{ fontSize: 15, fontWeight: 600, color: "#555", marginBottom: 12 }}>{title}</h2>
+      {children}
+    </div>
+  );
+}
+
+function InputRow({ label, value, onChange, placeholder }) {
+  return (
+    <div>
+      <label style={labelSt}>{label}</label>
+      <input
+        type="number"
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        placeholder={placeholder}
+        style={inputSt}
+      />
+    </div>
+  );
+}
+
+const labelSt = { display: "block", fontSize: 12, color: "#999", marginBottom: 4, fontWeight: 500 };
+const inputSt = {
+  width: "100%", padding: "8px 12px", background: "#fff",
+  border: "1px solid #e0e0dc", borderRadius: 8, fontSize: 15,
+  color: "#1a1a1a", outline: "none",
+};
+const selectSt = { ...inputSt, cursor: "pointer", appearance: "auto", fontSize: 13 };
+const thSt = { padding: "8px 12px", textAlign: "left", fontSize: 11, fontWeight: 600, color: "#999", borderBottom: "1px solid #e8e8e4" };
+const tdSt = { padding: "8px 12px", borderBottom: "1px solid #f0f0ec" };
+const copyBtnSt = {
+  padding: "4px 12px", background: "#1a1a1a", color: "#fff",
+  border: "none", borderRadius: 6, fontSize: 12, cursor: "pointer", fontFamily: "inherit",
+};
+const emailPreSt = {
+  padding: "20px 24px", margin: 0,
+  whiteSpace: "pre-wrap", wordBreak: "break-word",
+  fontSize: 13, lineHeight: 1.8, color: "#333",
+  fontFamily: "'Pretendard Variable', 'Noto Sans KR', sans-serif",
+  maxHeight: 600, overflowY: "auto",
+};
+
+ReactDOM.createRoot(document.getElementById("root")).render(
+  React.createElement(window.ReverseSimulator)
+);
+</script>
+</body>
+</html>
